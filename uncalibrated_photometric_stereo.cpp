@@ -1,12 +1,82 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
-#include "CF.h"
 #include "uncalibrated_photometric_stereo.h"
 
 template <typename T>
 int sgn(T val) 
 {
 	return (T(0) < val) - (val < T(0));
+}
+
+void updateHeights(cv::Mat &Normals, cv::Mat &Z, int iterations) {
+	for (int k = 0; k < iterations; k++) {
+		for (int i = 1; i < Normals.rows - 1; i++) {
+			for (int j = 1; j < Normals.cols - 1; j++) {
+				float zU = Z.at<float>(cv::Point(j, i - 1));
+				float zD = Z.at<float>(cv::Point(j, i + 1));
+				float zL = Z.at<float>(cv::Point(j - 1, i));
+				float zR = Z.at<float>(cv::Point(j + 1, i));
+				float nxC = Normals.at<cv::Vec3b>(cv::Point(j, i))[0];
+				float nyC = Normals.at<cv::Vec3b>(cv::Point(j, i))[1];
+				float nxU = Normals.at<cv::Vec3b>(cv::Point(j, i - 1))[0];
+				float nyU = Normals.at<cv::Vec3b>(cv::Point(j, i - 1))[1];
+				float nxD = Normals.at<cv::Vec3b>(cv::Point(j, i + 1))[0];
+				float nyD = Normals.at<cv::Vec3b>(cv::Point(j, i + 1))[1];
+				float nxL = Normals.at<cv::Vec3b>(cv::Point(j - 1, i))[0];
+				float nyL = Normals.at<cv::Vec3b>(cv::Point(j - 1, i))[1];
+				float nxR = Normals.at<cv::Vec3b>(cv::Point(j + 1, i))[0];
+				float nyR = Normals.at<cv::Vec3b>(cv::Point(j + 1, i))[1];
+				int up = nxU == 0 && nyU == 0 ? 0 : 1;
+				int down = nxD == 0 && nyD == 0 ? 0 : 1;
+				int left = nxL == 0 && nyL == 0 ? 0 : 1;
+				int right = nxR == 0 && nyR == 0 ? 0 : 1;
+
+				if (up > 0 && down > 0 && left > 0 && right > 0) {
+					Z.at<float>(cv::Point(j, i)) =
+						1.0f / 4.0f * (zD + zU + zR + zL + nxU - nxC + nyL - nyC);
+				}
+			}
+		}
+	}
+}
+
+cv::Mat localHeightfield(cv::Mat Normals) {
+	const int pyramidLevels = 2;
+	const int iterations = 5;
+	/* building image pyramid */
+	std::vector<cv::Mat> pyrNormals;
+	cv::Mat Normalmap = Normals.clone();
+	pyrNormals.push_back(Normalmap);
+
+	for (int i = 0; i < pyramidLevels; i++) {
+		cv::pyrDown(Normalmap, Normalmap);
+		pyrNormals.push_back(Normalmap.clone());
+	}
+
+	/* updating depth map along pyramid levels, starting with smallest level at
+	 * top */
+	cv::Mat Z(pyrNormals[pyramidLevels - 1].rows,
+		pyrNormals[pyramidLevels - 1].cols, CV_32FC1, cv::Scalar::all(0));
+
+	for (int i = pyramidLevels - 1; i > 0; i--) {
+		updateHeights(pyrNormals[i], Z, iterations);
+		cv::pyrUp(Z, Z);
+	}
+
+	/* linear transformation of matrix values from [min,max] -> [a,b] */
+	double min, max;
+	cv::minMaxIdx(Z, &min, &max);
+	double a = 0.0, b = 150.0;
+
+	for (int i = 0; i < Normals.rows; i++) {
+		for (int j = 0; j < Normals.cols; j++) {
+			Z.at<float>(cv::Point(j, i)) =
+				(float)a +
+				(b - a) * ((Z.at<float>(cv::Point(j, i)) - min) / (max - min));
+		}
+	}
+
+	return Z;
 }
 
 static cv::Mat computeNormals(std::vector<cv::Mat> camImages, cv::Mat& Mask)
@@ -83,39 +153,28 @@ int uncalibrated_photometric_stereo(const std::vector<cv::Mat>& images, cv::Mat&
 
 	//计算法向图
 	cv::Mat mask = cv::Mat(images[0].size(), CV_8UC1, cv::Scalar(255));
-	normalMap = computeNormals(images, mask);
-	cvtColor(normalMap, normalMap, cv::COLOR_BGR2RGB);
-	//计算梯度图
-	cv::Mat gx, gy, filterImg;
-	cvtColor(normalMap, filterImg, cv::COLOR_RGB2GRAY);
-	GaussianBlur(filterImg, filterImg, cv::Size(5, 5), 1.0, 0, cv::BORDER_DEFAULT);
-	spatialGradient(filterImg, gx, gy);
-	convertScaleAbs(gx, gx);
-	convertScaleAbs(gy, gy);
-	addWeighted(gx, 0.5, gy, 0.5, 0, gradient);
-	gradient = ~gradient;
+	gradient = computeNormals(images, mask);
 }
 
-int derivate_vector_field(cv::Mat& image, cv::Mat& dst, int method)
+//If use these filters to solve a complex data fitting term, define the data fitting as the blackbox function
+static float BlackBox(int row, int col, cv::Mat& U, cv::Mat & img_orig, float & d)
 {
-	if (image.empty() || method > 4)
+	//this is an example of adaptive norm
+	float diff = fabs(U.at<float>(row, col) + d - img_orig.at<float>(row, col));
+	float order = 2 - (fabs(U.at<float>(row + 1, col) - U.at<float>(row, col)) + fabs(U.at<float>(row, col + 1) - U.at<float>(row, col)));
+	return pow(diff, order);
+}
+
+int derivate_vector_field(cv::Mat& image, cv::Mat& dst)
+{
+	if (image.empty())
 	{
 		return 0;
 	}
 
-	int ItNum = 10;
-	int Type = method;
-	float lambda = 2.5f;
-	float DataFitOrder = 1.0f;
-	double mytime;
-	//filter solver for the variational models
-	CF *DualMesh = new CF;
-	DualMesh->set(image);
-	DualMesh->Solver(Type, mytime, ItNum, lambda, DataFitOrder);
-	dst = DualMesh->get();
-	cv::normalize(dst, dst, 150, 0, cv::NORM_MINMAX);
+	dst = localHeightfield(image);
+	cv::normalize(dst, dst, 255, 0, cv::NORM_MINMAX);
 	dst.convertTo(dst, CV_8U);
-	delete DualMesh;
-
+	
 	return 1;
 }

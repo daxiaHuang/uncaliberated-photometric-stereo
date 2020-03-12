@@ -41,11 +41,9 @@ int uncalibrated_photometric_stereo(const std::vector<cv::Mat>& images, cv::Mat&
 
 /**
 
-*  @brief	曲率计算
+*  @brief	缺陷图构建
 
 *  @param[in]	image 输入图像
-
-*  @param[in]	method 包含方法：Mean Curvature 和 Gaussian Curvature
 
 *  @param[out]	dst 输出图像
 
@@ -60,4 +58,4 @@ int uncalibrated_photometric_stereo(const std::vector<cv::Mat>& images, cv::Mat&
 *  @date	2020/03/03 16:28
 
 */
-int derivate_vector_field(cv::Mat& image, cv::Mat& dst, int method);
+int derivate_vector_field(cv::Mat& image, cv::Mat& dst);
