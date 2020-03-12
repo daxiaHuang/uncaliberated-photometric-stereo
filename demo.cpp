@@ -1,8 +1,8 @@
 #include <iostream>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 #include "uncalibrated_photometric_stereo.h"
-#include "type.h"
 
 /**
 * 功能：光度立体算法用于缺陷检测，至少需要三张
@@ -21,7 +21,8 @@ int main(int argc, char *argv[])
 	{
 		std::stringstream s;
 		s << "./images/image" << i << ".png";
-		camImages.push_back(cv::imread(s.str(), cv::IMREAD_GRAYSCALE));
+		cv::Mat src = cv::imread(s.str(), cv::IMREAD_GRAYSCALE);
+		camImages.push_back(src.clone());
 	}
   
 	/********************step1：计算法向图***************************/
@@ -30,8 +31,7 @@ int main(int argc, char *argv[])
 
 	/********************step2：计算缺陷图***************************/
 	cv::Mat defectImg;
-	derivate_vector_field(gradient, defectImg, Curvature_Mean);
-
+	derivate_vector_field(gradient, defectImg);
 
 	return 0;
 }
